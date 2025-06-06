@@ -66,6 +66,7 @@ func (s *StressorImpl) Stress(ctx context.Context, config *StressorConfig) error
 		Name: fmt.Sprintf(SecretPathFmt, config.Project, config.Secret),
 	}
 	stressFunc := func() {
+		ctx := context.Background()
 		count.Add(1)
 		client, err := secretmanager.NewClient(ctx, option.WithEndpoint("dns:///secretmanager.googleapis.com:443"))
 		if err != nil {
@@ -76,7 +77,7 @@ func (s *StressorImpl) Stress(ctx context.Context, config *StressorConfig) error
 		defer client.Close()
 		if _, err = client.AccessSecretVersion(ctx, accessSecretVersionRequest); err != nil {
 			countErrs.Add(1)
-			slog.ErrorContext(ctx, "failed to create secret manager client", "error", err)
+			slog.ErrorContext(ctx, "failed to access secret", "error", err)
 			return
 		}
 	}
