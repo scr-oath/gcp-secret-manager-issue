@@ -4,13 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync/atomic"
+	"time"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/go-errors/errors"
 	"github.com/kelseyhightower/envconfig"
-	"github.com/panjf2000/ants"
+	"github.com/sourcegraph/conc/pool"
 	"google.golang.org/api/option"
 )
 
@@ -55,17 +57,18 @@ func DefaultStressorConfig() (*StressorConfig, error) {
 }
 
 func (s *StressorImpl) Stress(ctx context.Context, config *StressorConfig) error {
-	pool, err := ants.NewPool(config.Parallelism)
-	if err != nil {
-		return errors.Wrap(err, 0)
-	}
-	defer pool.Release()
+	p := pool.New().
+		WithMaxGoroutines(config.Parallelism)
 
-	var count, countErrs atomic.Int64
+	var count, countErrs, duration atomic.Int64
 	accessSecretVersionRequest := &secretmanagerpb.AccessSecretVersionRequest{
 		Name: fmt.Sprintf(SecretPathFmt, config.Project, config.Secret),
 	}
 	stressFunc := func() {
+		start := time.Now()
+		defer func() {
+			duration.Add(time.Since(start).Milliseconds())
+		}()
 		ctx := context.Background()
 		count.Add(1)
 		client, err := secretmanager.NewClient(ctx, option.WithEndpoint("dns:///secretmanager.googleapis.com:443"))
@@ -84,15 +87,19 @@ func (s *StressorImpl) Stress(ctx context.Context, config *StressorConfig) error
 	for {
 		select {
 		case <-ctx.Done():
+			slog.InfoContext(ctx, "Waiting for all goroutines to finish")
+			p.Wait()
+			averageDuration := float64(duration.Load()) / float64(count.Load())
+			averageDuration = math.Round(averageDuration*100) / 100
 			slog.InfoContext(ctx, "stress test completed",
 				"count", count.Load(),
 				"error_count", countErrs.Load(),
+				"duration_ms", duration.Load(),
+				"average_duration_ms", averageDuration,
 			)
 			return nil
 		default:
-			if err = pool.Submit(stressFunc); err != nil {
-				return errors.Wrap(err, 0)
-			}
+			p.Go(stressFunc)
 		}
 	}
 }
